@@ -10,9 +10,11 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QDate
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 import matplotlib.pyplot as plt
+import json  # Add this import for archive storage
 
 COLUMNS = ["Scheduled Payment", "Price", "Previous Date", "Date", "Next Date", "Paid", "Outstanding"]
 SAVE_FILE = "payments.csv"
+ARCHIVE_FILE = "payments_archive.json"  # New archive file
 
 class PaymentTracker(QMainWindow):
     def __init__(self):
@@ -91,7 +93,9 @@ class PaymentTracker(QMainWindow):
         """)
 
         self.data = pd.DataFrame(columns=COLUMNS)
+        self.archive_data = []  # New archive data storage
         self.load_data()
+        self.load_archive()  # Load archive data
 
         # --- Summary Metrics ---
         self.total_label = QLabel()
@@ -126,6 +130,9 @@ class PaymentTracker(QMainWindow):
         self.remove_button = QPushButton("🗑️ Remove Row")
         self.remove_button.clicked.connect(self.remove_row)
 
+        self.archive_button = QPushButton("📦 Archive Row")
+        self.archive_button.clicked.connect(self.archive_row)
+
         self.update_button = QPushButton("🔄 Auto Update Payments")
         self.update_button.clicked.connect(self.auto_update)
 
@@ -138,9 +145,24 @@ class PaymentTracker(QMainWindow):
         button_layout = QHBoxLayout()
         button_layout.addWidget(self.add_button)
         button_layout.addWidget(self.remove_button)
+        button_layout.addWidget(self.archive_button)
         button_layout.addWidget(self.update_button)
         button_layout.addWidget(self.save_button)
         button_layout.addWidget(self.upload_button)
+
+        # --- Archive Table and Buttons ---
+        self.archive_table = QTableWidget()
+        self.setup_archive_table()
+
+        self.unarchive_button = QPushButton("📤 Unarchive Row")
+        self.unarchive_button.clicked.connect(self.unarchive_row)
+
+        self.clear_archive_button = QPushButton("🗑️ Clear Archive")
+        self.clear_archive_button.clicked.connect(self.clear_archive)
+
+        archive_button_layout = QHBoxLayout()
+        archive_button_layout.addWidget(self.unarchive_button)
+        archive_button_layout.addWidget(self.clear_archive_button)
 
         # --- Dashboard Tab ---
         dashboard_widget = QWidget()
@@ -157,10 +179,18 @@ class PaymentTracker(QMainWindow):
         data_layout.addWidget(self.table)
         data_widget.setLayout(data_layout)
 
+        # --- Archive Tab ---
+        archive_widget = QWidget()
+        archive_layout = QVBoxLayout()
+        archive_layout.addLayout(archive_button_layout)
+        archive_layout.addWidget(self.archive_table)
+        archive_widget.setLayout(archive_layout)
+
         # --- Tabs ---
         self.tabs = QTabWidget()
         self.tabs.addTab(dashboard_widget, "Dashboard")
         self.tabs.addTab(data_widget, "Raw Data")
+        self.tabs.addTab(archive_widget, "Archive")
 
         # --- Main Layout ---
         main_layout = QVBoxLayout()
@@ -562,6 +592,156 @@ class PaymentTracker(QMainWindow):
                 self.save_data()
         else:
             QMessageBox.warning(self, "No Selection", "Please select a row to remove.")
+
+    def archive_row(self):
+        """Archive the selected row"""
+        current_row = self.table.currentRow()
+        if current_row >= 0:
+            reply = QMessageBox.question(
+                self, 
+                "Archive Row", 
+                f"Are you sure you want to archive row {current_row + 1}?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                # Get the row data
+                row_data = {}
+                for col_idx, col_name in enumerate(COLUMNS):
+                    if col_name == "Paid":
+                        combo = self.table.cellWidget(current_row, col_idx + 1)
+                        value = combo.currentText() if combo else "🔴 No"
+                    else:
+                        value = self.table.item(current_row, col_idx + 1).text()
+                    
+                    # Clean up price value for storage
+                    if col_name == "Price":
+                        value = value.replace('£', '').replace(',', '').strip()
+                    
+                    row_data[col_name] = value
+                
+                # Add to archive
+                self.archive_data.append(row_data)
+                self.save_archive()
+                
+                # Remove from main table
+                self.table.removeRow(current_row)
+                self.data = self.data.drop(current_row).reset_index(drop=True)
+                self.save_data()
+                
+                # Update archive table
+                self.setup_archive_table()
+                
+                QMessageBox.information(self, "Archived", f"Row {current_row + 1} has been archived.")
+        else:
+            QMessageBox.warning(self, "No Selection", "Please select a row to archive.")
+
+    def unarchive_row(self):
+        """Unarchive the selected row"""
+        current_row = self.archive_table.currentRow()
+        if current_row >= 0:
+            reply = QMessageBox.question(
+                self, 
+                "Unarchive Row", 
+                f"Are you sure you want to unarchive row {current_row + 1}?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                # Get the archived row data
+                row_data = self.archive_data[current_row]
+                
+                # Add to main data
+                new_row = pd.DataFrame([row_data])
+                self.data = pd.concat([self.data, new_row], ignore_index=True)
+                self.save_data()
+                
+                # Remove from archive
+                self.archive_data.pop(current_row)
+                self.save_archive()
+                
+                # Update tables
+                self.setup_table()
+                self.setup_archive_table()
+                
+                QMessageBox.information(self, "Unarchived", f"Row {current_row + 1} has been unarchived.")
+        else:
+            QMessageBox.warning(self, "No Selection", "Please select a row to unarchive.")
+
+    def clear_archive(self):
+        """Clear all archived data"""
+        if not self.archive_data:
+            QMessageBox.information(self, "Empty Archive", "The archive is already empty.")
+            return
+            
+        reply = QMessageBox.question(
+            self, 
+            "Clear Archive", 
+            f"Are you sure you want to clear all {len(self.archive_data)} archived items? This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.archive_data = []
+            self.save_archive()
+            self.setup_archive_table()
+            QMessageBox.information(self, "Archive Cleared", "All archived data has been cleared.")
+
+    def load_archive(self):
+        """Load archived data from JSON file"""
+        try:
+            if os.path.exists(ARCHIVE_FILE):
+                with open(ARCHIVE_FILE, 'r') as f:
+                    self.archive_data = json.load(f)
+            else:
+                self.archive_data = []
+        except Exception as e:
+            print(f"Error loading archive: {e}")
+            self.archive_data = []
+
+    def save_archive(self):
+        """Save archived data to JSON file"""
+        try:
+            with open(ARCHIVE_FILE, 'w') as f:
+                json.dump(self.archive_data, f, indent=2)
+        except Exception as e:
+            print(f"Error saving archive: {e}")
+
+    def setup_archive_table(self):
+        """Setup the archive table"""
+        self.archive_table.blockSignals(True)
+        self.archive_table.setColumnCount(len(COLUMNS) + 1)  # +1 for row numbers
+        self.archive_table.setHorizontalHeaderLabels(["#"] + COLUMNS)
+        self.archive_table.setRowCount(len(self.archive_data))
+
+        for row_idx, row_data in enumerate(self.archive_data):
+            # Add row number in first column
+            row_number_item = QTableWidgetItem(str(row_idx + 1))
+            row_number_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            row_number_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.archive_table.setItem(row_idx, 0, row_number_item)
+            
+            for col_idx, col_name in enumerate(COLUMNS):
+                value = row_data.get(col_name, "")
+                
+                if col_name == "Price":
+                    # Format price with pound symbol
+                    try:
+                        clean_value = str(value).replace('£', '').replace(',', '').strip()
+                        if clean_value and clean_value != 'nan':
+                            float_value = float(clean_value)
+                            formatted_price = f"£{float_value:,.2f}"
+                        else:
+                            formatted_price = "£0.00"
+                    except (ValueError, TypeError):
+                        formatted_price = "£0.00"
+                    
+                    item = QTableWidgetItem(formatted_price)
+                else:
+                    item = QTableWidgetItem(str(value))
+                
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled)  # Make archive table read-only
+                self.archive_table.setItem(row_idx, col_idx + 1, item)
+
+        self.archive_table.blockSignals(False)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
