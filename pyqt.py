@@ -217,11 +217,40 @@ class PaymentTracker(QMainWindow):
         self.update_pie_chart()
         self.update_monthly_chart()
 
+    def sync_outstanding_amounts(self):
+        """Sync outstanding amounts based on paid status and price"""
+        for i, row in self.data.iterrows():
+            try:
+                paid_status = str(row["Paid"]).strip()
+                price_value = str(row["Price"]).replace('£', '').replace(',', '').strip()
+                
+                # Convert price to float
+                if price_value and price_value != 'nan':
+                    price_float = float(price_value)
+                else:
+                    price_float = 0
+                
+                # Set outstanding based on paid status
+                if paid_status == "🟢 Yes":
+                    self.data.at[i, "Outstanding"] = 0
+                elif paid_status == "🔴 No":
+                    self.data.at[i, "Outstanding"] = price_float
+                else:
+                    # Default to unpaid if status is unclear
+                    self.data.at[i, "Outstanding"] = price_float
+                    
+            except Exception as e:
+                print(f"Error syncing outstanding amount for row {i}: {e}")
+                self.data.at[i, "Outstanding"] = 0
+
     def setup_table(self):
         self.table.blockSignals(True)
         self.table.setColumnCount(len(COLUMNS) + 1)  # +1 for row numbers
         self.table.setHorizontalHeaderLabels(["#"] + COLUMNS)  # Add "#" header
         self.table.setRowCount(len(self.data))
+
+        # Sync outstanding amounts before setting up the table
+        self.sync_outstanding_amounts()
 
         for row_idx, row in self.data.iterrows():
             # Add row number in first column
@@ -259,6 +288,21 @@ class PaymentTracker(QMainWindow):
                         formatted_price = "£0.00"
                     
                     item = QTableWidgetItem(formatted_price)
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    self.table.setItem(row_idx, col_idx + 1, item)  # +1 for row number column
+                elif col_name == "Outstanding":
+                    # Format outstanding with pound symbol - use the synced value
+                    try:
+                        outstanding_value = self.data.at[row_idx, "Outstanding"]
+                        if outstanding_value and outstanding_value != 'nan':
+                            float_value = float(outstanding_value)
+                            formatted_outstanding = f"£{float_value:,.2f}"
+                        else:
+                            formatted_outstanding = "£0.00"
+                    except (ValueError, TypeError):
+                        formatted_outstanding = "£0.00"
+                    
+                    item = QTableWidgetItem(formatted_outstanding)
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                     self.table.setItem(row_idx, col_idx + 1, item)  # +1 for row number column
                 else:
@@ -512,7 +556,7 @@ class PaymentTracker(QMainWindow):
             old_value = self.data.iat[row, col - 1]  # -1 because we added row number column
             self.data.iat[row, col - 1] = value
             
-            # If status changed from "🔴 No" to "🟢 Yes", update dates
+            # If status changed from "🔴 No" to "🟢 Yes", update dates and set outstanding to 0
             if old_value == "🔴 No" and value == "🟢 Yes":
                 try:
                     # Get current dates
@@ -530,11 +574,27 @@ class PaymentTracker(QMainWindow):
                 except Exception as e:
                     print(f"Error updating dates for row {row}: {e}")
             
+            # If status changed from "🟢 Yes" to "🔴 No", set outstanding to price amount
+            elif old_value == "🟢 Yes" and value == "🔴 No":
+                try:
+                    price_value = str(self.data.at[row, "Price"]).replace('£', '').replace(',', '').strip()
+                    if price_value and price_value != 'nan':
+                        self.data.at[row, "Outstanding"] = float(price_value)
+                    else:
+                        self.data.at[row, "Outstanding"] = 0
+                except (ValueError, TypeError):
+                    self.data.at[row, "Outstanding"] = 0
+            
+            # Always sync outstanding amounts after any paid status change
+            self.sync_outstanding_amounts()
+            self.setup_table()
             self.save_data()
 
     def check_and_update_overdue_payments(self):
-        """Check for overdue payments and update them automatically, catching up multiple cycles if needed."""
+        """Check for overdue payments and update them automatically, tracking monthly cycles properly."""
         today = datetime.today().date()
+        current_month = today.month
+        current_year = today.year
         updated = False
 
         for i, row in self.data.iterrows():
@@ -542,36 +602,141 @@ class PaymentTracker(QMainWindow):
                 # Only process if there is a valid date
                 if row["Date"] != "" and row["Date"] != "NaT":
                     current_date = datetime.strptime(str(row["Date"]), "%d/%m/%Y").date()
-                    next_date = None
+                    payment_month = current_date.month
+                    payment_year = current_date.year
+                    
+                    # Get or calculate next date
                     if row["Next Date"] != "" and row["Next Date"] != "NaT":
                         next_date = datetime.strptime(str(row["Next Date"]), "%d/%m/%Y").date()
                     else:
                         next_date = current_date + timedelta(days=30)
+                    
+                    # Get or calculate previous date
+                    if row["Previous Date"] != "" and row["Previous Date"] != "NaT":
+                        previous_date = datetime.strptime(str(row["Previous Date"]), "%d/%m/%Y").date()
+                    else:
+                        previous_date = current_date - timedelta(days=30)
 
-                    # If the payment is overdue, keep shifting until the date is in the future
-                    while current_date <= today:
-                        # Mark as paid for the overdue period
-                        self.data.at[i, "Paid"] = "🟢 Yes"
-                        self.data.at[i, "Outstanding"] = 0
-                        self.data.at[i, "Previous Date"] = current_date.strftime("%d/%m/%Y")
-                        self.data.at[i, "Date"] = next_date.strftime("%d/%m/%Y")
-                        self.data.at[i, "Next Date"] = (next_date + timedelta(days=30)).strftime("%d/%m/%Y")
-                        updated = True
+                    # Store original date and paid status to check if we made changes
+                    original_date = current_date
+                    original_paid = str(row["Paid"]).strip()
 
-                        # Prepare for next cycle
+                    # Check if payment date is in a past month (need to shift forward)
+                    # Compare by month/year, not just date
+                    payment_is_past = (payment_year < current_year) or \
+                                    (payment_year == current_year and payment_month < current_month)
+                    
+                    # Shift dates forward if payment month is in the past
+                    # When we shift to a new month, we need to reset the paid status
+                    # because the previous month's status doesn't apply to the new month
+                    month_shifted = False
+                    while payment_is_past:
+                        # This month was in the past, shift to next month
+                        previous_date = current_date
                         current_date = next_date
                         next_date = current_date + timedelta(days=30)
+                        month_shifted = True
+                        
+                        # Recalculate payment month/year after shift
+                        payment_month = current_date.month
+                        payment_year = current_date.year
+                        payment_is_past = (payment_year < current_year) or \
+                                        (payment_year == current_year and payment_month < current_month)
+                        updated = True
+                    
+                    # If we shifted to a new month, reset paid status (new month hasn't been paid yet)
+                    if month_shifted:
+                        original_paid = "🔴 No"  # Reset to unpaid for the new month
+                    
+                    # Update the dates in the dataframe
+                    self.data.at[i, "Previous Date"] = previous_date.strftime("%d/%m/%Y")
+                    self.data.at[i, "Date"] = current_date.strftime("%d/%m/%Y")
+                    self.data.at[i, "Next Date"] = next_date.strftime("%d/%m/%Y")
 
-                    # Reset to "🔴 No" at the end of the month
-                    last_day_of_month = (today.replace(day=1) + timedelta(days=32)).replace(day=1) - timedelta(days=1)
-                    if (self.data.at[i, "Paid"] == "🟢 Yes" and 
-                        today == last_day_of_month):
-                        self.data.at[i, "Paid"] = "🔴 No"
+                    # Determine payment status based on current date
+                    # Check if payment date is in the current month
+                    payment_is_current_month = (payment_year == current_year and payment_month == current_month)
+                    
+                    if payment_is_current_month:
+                        # Payment is due this month - check if date has passed
+                        if current_date <= today:
+                            # Payment date has passed - respect the current paid status
+                            # Don't automatically change it, let user mark it as paid manually
+                            # But if it's not paid and date passed, it's overdue
+                            if original_paid == "🟢 Yes":
+                                new_paid_status = "🟢 Yes"
+                                new_outstanding = 0
+                            else:
+                                # Payment date passed but not marked as paid - it's overdue
+                                new_paid_status = "🔴 No"
+                                try:
+                                    price_value = str(row["Price"]).replace('£', '').replace(',', '').strip()
+                                    if price_value and price_value != 'nan':
+                                        new_outstanding = float(price_value)
+                                    else:
+                                        new_outstanding = 0
+                                except (ValueError, TypeError):
+                                    new_outstanding = 0
+                        else:
+                            # Payment date hasn't arrived yet this month
+                            new_paid_status = "🔴 No"
+                            try:
+                                price_value = str(row["Price"]).replace('£', '').replace(',', '').strip()
+                                if price_value and price_value != 'nan':
+                                    new_outstanding = float(price_value)
+                                else:
+                                    new_outstanding = 0
+                            except (ValueError, TypeError):
+                                new_outstanding = 0
+                    else:
+                        # Payment is not in current month (shouldn't happen after shift, but handle it)
+                        # If in past month, it should have been shifted. If in future, mark as unpaid
+                        if payment_year > current_year or (payment_year == current_year and payment_month > current_month):
+                            # Future month
+                            new_paid_status = "🔴 No"
+                            try:
+                                price_value = str(row["Price"]).replace('£', '').replace(',', '').strip()
+                                if price_value and price_value != 'nan':
+                                    new_outstanding = float(price_value)
+                                else:
+                                    new_outstanding = 0
+                            except (ValueError, TypeError):
+                                new_outstanding = 0
+                        else:
+                            # This shouldn't happen, but default to unpaid
+                            new_paid_status = "🔴 No"
+                            try:
+                                price_value = str(row["Price"]).replace('£', '').replace(',', '').strip()
+                                if price_value and price_value != 'nan':
+                                    new_outstanding = float(price_value)
+                                else:
+                                    new_outstanding = 0
+                            except (ValueError, TypeError):
+                                new_outstanding = 0
+                    
+                    # Always update status to reflect current date check
+                    # This ensures the status is always current, not just when dates change
+                    # Compare outstanding amounts (handle formatted strings)
+                    try:
+                        current_outstanding = str(self.data.at[i, "Outstanding"]).replace('£', '').replace(',', '').strip()
+                        if current_outstanding and current_outstanding != 'nan':
+                            current_outstanding_float = float(current_outstanding)
+                        else:
+                            current_outstanding_float = 0
+                    except (ValueError, TypeError):
+                        current_outstanding_float = 0
+                    
+                    if new_paid_status != original_paid or current_date != original_date or abs(new_outstanding - current_outstanding_float) > 0.01:
+                        self.data.at[i, "Paid"] = new_paid_status
+                        self.data.at[i, "Outstanding"] = new_outstanding
+                        updated = True
                         
             except Exception as e:
                 print(f"Error checking overdue payment in row {i}: {e}")
 
         if updated:
+            # Sync outstanding amounts after any changes
+            self.sync_outstanding_amounts()
             self.setup_table()
             self.save_data()
             return True
