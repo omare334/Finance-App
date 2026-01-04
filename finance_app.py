@@ -7,10 +7,11 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTableWidget, QTableWidgetItem, QMessageBox, QDateEdit,
     QLabel, QGroupBox, QTabWidget, QComboBox, QLineEdit, QDoubleSpinBox,
-    QHeaderView, QDialog, QDialogButtonBox, QFormLayout, QCheckBox, QSpinBox
+    QHeaderView, QDialog, QDialogButtonBox, QFormLayout, QCheckBox, QSpinBox,
+    QCalendarWidget, QTextEdit
 )
 from PyQt6.QtCore import Qt, QDate
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QColor, QTextCharFormat
 
 DB_FILE = "finance.db"
 
@@ -625,6 +626,10 @@ class FinanceApp(QMainWindow):
         # History Tab
         self.history_tab = self.create_history_tab()
         self.tabs.addTab(self.history_tab, "History")
+        
+        # Calendar Tab
+        self.calendar_tab = self.create_calendar_tab()
+        self.tabs.addTab(self.calendar_tab, "📅 Calendar")
         
         # Main layout
         main_widget = QWidget()
@@ -2602,6 +2607,373 @@ class FinanceApp(QMainWindow):
             conn.rollback()
             conn.close()
             QMessageBox.critical(self, "Error", f"Failed to save savings: {str(e)}")
+    
+    def create_calendar_tab(self):
+        """Create calendar view tab showing daily payment and income totals"""
+        widget = QWidget()
+        layout = QVBoxLayout()
+        
+        # Title
+        title_label = QLabel(f"<h1 style='color: #ffffff; text-align: center;'>📅 Financial Calendar</h1>")
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_label.setStyleSheet("""
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                stop:0 #667eea, stop:1 #764ba2);
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 10px;
+        """)
+        layout.addWidget(title_label)
+        
+        # Calendar and details layout
+        calendar_layout = QHBoxLayout()
+        
+        # Calendar widget
+        self.calendar = QCalendarWidget()
+        self.calendar.setGridVisible(True)
+        self.calendar.setStyleSheet("""
+            QCalendarWidget {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, 
+                    stop:0 #2d3748, stop:1 #1a202c);
+                border: 2px solid #4a5568;
+                border-radius: 10px;
+                color: #ffffff;
+            }
+            QCalendarWidget QTableView {
+                alternate-background-color: #2d3748;
+                background-color: #1a202c;
+                selection-background-color: #667eea;
+            }
+            QCalendarWidget QTableView::item {
+                padding: 5px;
+            }
+            QCalendarWidget QHeaderView::section {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 #667eea, stop:1 #764ba2);
+                color: #ffffff;
+                font-weight: bold;
+                padding: 5px;
+            }
+            QCalendarWidget QSpinBox {
+                background: #2d3748;
+                color: #ffffff;
+                border: 1px solid #4a5568;
+                border-radius: 5px;
+                padding: 5px;
+            }
+            QCalendarWidget QToolButton {
+                background: #2d3748;
+                color: #ffffff;
+                border: 1px solid #4a5568;
+                border-radius: 5px;
+                padding: 5px;
+            }
+        """)
+        
+        # Connect calendar signals
+        self.calendar.selectionChanged.connect(self.on_calendar_date_selected)
+        self.calendar.currentPageChanged.connect(self.on_calendar_month_changed)
+        
+        calendar_layout.addWidget(self.calendar, 2)
+        
+        # Details panel
+        details_group = QGroupBox("Day Details")
+        details_layout = QVBoxLayout()
+        
+        self.day_details_text = QTextEdit()
+        self.day_details_text.setReadOnly(True)
+        self.day_details_text.setStyleSheet("""
+            QTextEdit {
+                background: #1a202c;
+                color: #ffffff;
+                border: 1px solid #4a5568;
+                border-radius: 5px;
+                padding: 10px;
+                font-size: 12px;
+            }
+        """)
+        details_layout.addWidget(self.day_details_text)
+        
+        refresh_calendar_btn = QPushButton("🔄 Refresh Calendar")
+        refresh_calendar_btn.clicked.connect(self.refresh_calendar)
+        refresh_calendar_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 #667eea, stop:1 #764ba2);
+                color: #ffffff;
+                border: none;
+                border-radius: 5px;
+                padding: 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 #764ba2, stop:1 #667eea);
+            }
+        """)
+        details_layout.addWidget(refresh_calendar_btn)
+        
+        details_group.setLayout(details_layout)
+        calendar_layout.addWidget(details_group, 1)
+        
+        layout.addLayout(calendar_layout)
+        
+        # Initialize calendar
+        self.refresh_calendar()
+        
+        widget.setLayout(layout)
+        return widget
+    
+    def refresh_calendar(self):
+        """Refresh calendar colors and data"""
+        # Get current month/year from calendar
+        selected_date = self.calendar.selectedDate()
+        current_month = selected_date.month()
+        current_year = selected_date.year()
+        
+        # Calculate daily totals
+        daily_totals = self.calculate_daily_totals(current_month, current_year)
+        
+        # Color code calendar dates
+        red_format = QTextCharFormat()
+        red_format.setForeground(QColor("#ff6b6b"))
+        red_format.setBackground(QColor("#2d1a1a"))
+        red_format.setFontWeight(QFont.Weight.Bold)
+        
+        green_format = QTextCharFormat()
+        green_format.setForeground(QColor("#51cf66"))
+        green_format.setBackground(QColor("#1a2d1a"))
+        green_format.setFontWeight(QFont.Weight.Bold)
+        
+        mixed_format = QTextCharFormat()
+        mixed_format.setForeground(QColor("#ffd43b"))
+        mixed_format.setBackground(QColor("#2d2d1a"))
+        mixed_format.setFontWeight(QFont.Weight.Bold)
+        
+        # Reset all dates first
+        for day in range(1, 32):
+            try:
+                date = QDate(current_year, current_month, day)
+                if date.isValid():
+                    self.calendar.setDateTextFormat(date, QTextCharFormat())
+            except:
+                pass
+        
+        # Apply colors based on totals
+        for day, totals in daily_totals.items():
+            try:
+                date = QDate(current_year, current_month, day)
+                if date.isValid():
+                    outgoing = totals.get('outgoing', 0)
+                    incoming = totals.get('incoming', 0)
+                    
+                    if outgoing > 0 and incoming > 0:
+                        self.calendar.setDateTextFormat(date, mixed_format)
+                    elif outgoing > 0:
+                        self.calendar.setDateTextFormat(date, red_format)
+                    elif incoming > 0:
+                        self.calendar.setDateTextFormat(date, green_format)
+            except:
+                pass
+        
+        # Update details for selected date
+        self.on_calendar_date_selected()
+    
+    def calculate_daily_totals(self, month, year):
+        """Calculate total outgoing and incoming amounts for each day in the month"""
+        daily_totals = {}
+        
+        conn = self.db.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Get all active recurring payments
+            cursor.execute("""
+                SELECT id, name, amount, payment_day, payment_type
+                FROM recurring_payments
+                WHERE COALESCE(is_active, 1) = 1
+            """)
+            recurring_payments = cursor.fetchall()
+            
+            # Get all one-time payments for this month
+            cursor.execute("""
+                SELECT name, amount, payment_date
+                FROM one_time_payments
+                WHERE strftime('%Y-%m', payment_date) = ?
+            """, (f"{year}-{month:02d}",))
+            one_time_payments = cursor.fetchall()
+            
+            # Get all recurring income
+            cursor.execute("SELECT id, name, amount, income_day FROM recurring_income")
+            recurring_income = cursor.fetchall()
+            
+            # Calculate last day of month
+            if month == 12:
+                next_month = 1
+                next_year = year + 1
+            else:
+                next_month = month + 1
+                next_year = year
+            
+            last_day = (datetime(next_year, next_month, 1) - timedelta(days=1)).day
+            
+            # Process recurring payments
+            for payment_id, name, amount, payment_day, payment_type in recurring_payments:
+                # Calculate payment date for this month
+                try:
+                    payment_date = datetime(year, month, int(payment_day)).date()
+                except ValueError:
+                    # Handle day 31 in months with fewer days
+                    payment_date = datetime(year, month, last_day).date()
+                
+                day = payment_date.day
+                if day not in daily_totals:
+                    daily_totals[day] = {'outgoing': 0, 'incoming': 0, 'details': {'outgoing': [], 'incoming': []}}
+                
+                # Both debit and credit payments are money going out
+                # The distinction is just for tracking purposes (e.g., credit card vs debit card)
+                payment_type_label = "Credit" if payment_type == 'credit' else "Debit"
+                daily_totals[day]['outgoing'] += amount
+                daily_totals[day]['details']['outgoing'].append(f"{name} ({payment_type_label}): £{amount:,.2f}")
+            
+            # Process one-time payments
+            for name, amount, payment_date_str in one_time_payments:
+                try:
+                    if isinstance(payment_date_str, str):
+                        payment_date = datetime.strptime(payment_date_str, "%Y-%m-%d").date()
+                    else:
+                        payment_date = payment_date_str
+                    
+                    day = payment_date.day
+                    if day not in daily_totals:
+                        daily_totals[day] = {'outgoing': 0, 'incoming': 0, 'details': {'outgoing': [], 'incoming': []}}
+                    
+                    daily_totals[day]['outgoing'] += amount
+                    daily_totals[day]['details']['outgoing'].append(f"{name} (one-time): £{amount:,.2f}")
+                except Exception as e:
+                    print(f"Error processing one-time payment: {e}")
+                    continue
+            
+            # Process recurring income
+            for income_id, name, amount, income_day in recurring_income:
+                # Calculate income date for this month
+                try:
+                    income_date = datetime(year, month, int(income_day)).date()
+                except ValueError:
+                    # Handle day 31 in months with fewer days
+                    income_date = datetime(year, month, last_day).date()
+                
+                day = income_date.day
+                if day not in daily_totals:
+                    daily_totals[day] = {'outgoing': 0, 'incoming': 0, 'details': {'outgoing': [], 'incoming': []}}
+                
+                daily_totals[day]['incoming'] += amount
+                daily_totals[day]['details']['incoming'].append(f"{name}: £{amount:,.2f}")
+        
+        finally:
+            conn.close()
+        
+        # Calculate running totals for each day
+        running_outgoing = 0
+        running_incoming = 0
+        
+        # Calculate last day of month
+        if month == 12:
+            next_month = 1
+            next_year = year + 1
+        else:
+            next_month = month + 1
+            next_year = year
+        
+        last_day = (datetime(next_year, next_month, 1) - timedelta(days=1)).day
+        
+        # Process each day from 1 to last_day
+        for day in range(1, last_day + 1):
+            if day in daily_totals:
+                running_outgoing += daily_totals[day]['outgoing']
+                running_incoming += daily_totals[day]['incoming']
+            
+            # Add running totals to each day's data
+            if day not in daily_totals:
+                daily_totals[day] = {'outgoing': 0, 'incoming': 0, 'details': {'outgoing': [], 'incoming': []}}
+            
+            daily_totals[day]['running_outgoing'] = running_outgoing
+            daily_totals[day]['running_incoming'] = running_incoming
+            daily_totals[day]['running_net'] = running_incoming - running_outgoing
+        
+        return daily_totals
+    
+    def on_calendar_date_selected(self):
+        """Handle calendar date selection"""
+        selected_date = self.calendar.selectedDate()
+        day = selected_date.day()
+        month = selected_date.month()
+        year = selected_date.year()
+        
+        # Calculate daily totals
+        daily_totals = self.calculate_daily_totals(month, year)
+        
+        # Format date
+        date_str = selected_date.toString("dddd, MMMM d, yyyy")
+        
+        # Build details text
+        details_html = f"<h2 style='color: #667eea;'>{date_str}</h2><br>"
+        
+        if day in daily_totals:
+            totals = daily_totals[day]
+            outgoing = totals.get('outgoing', 0)
+            incoming = totals.get('incoming', 0)
+            running_outgoing = totals.get('running_outgoing', 0)
+            running_incoming = totals.get('running_incoming', 0)
+            running_net = totals.get('running_net', 0)
+            
+            # Day-specific transactions
+            details_html += "<h3 style='color: #ffffff; border-bottom: 2px solid #4a5568; padding-bottom: 5px;'>This Day's Transactions</h3>"
+            
+            if outgoing > 0:
+                details_html += f"<h4 style='color: #ff6b6b;'>💸 Money Going Out: £{outgoing:,.2f}</h4>"
+                details_html += "<ul>"
+                for detail in totals['details']['outgoing']:
+                    details_html += f"<li style='color: #ff8787;'>{detail}</li>"
+                details_html += "</ul><br>"
+            
+            if incoming > 0:
+                details_html += f"<h4 style='color: #51cf66;'>💰 Money Coming In: £{incoming:,.2f}</h4>"
+                details_html += "<ul>"
+                for detail in totals['details']['incoming']:
+                    details_html += f"<li style='color: #69db7c;'>{detail}</li>"
+                details_html += "</ul><br>"
+            
+            if outgoing == 0 and incoming == 0:
+                details_html += "<p style='color: #a0a0a0;'>No transactions scheduled for this day.</p><br>"
+            
+            net = incoming - outgoing
+            if net > 0:
+                details_html += f"<h4 style='color: #51cf66;'>📊 Day's Net: +£{net:,.2f}</h4><br>"
+            elif net < 0:
+                details_html += f"<h4 style='color: #ff6b6b;'>📊 Day's Net: £{net:,.2f}</h4><br>"
+            else:
+                details_html += f"<h4 style='color: #ffffff;'>📊 Day's Net: £0.00</h4><br>"
+            
+            # Running totals from start of month
+            details_html += "<h3 style='color: #ffffff; border-bottom: 2px solid #4a5568; padding-bottom: 5px; margin-top: 15px;'>Running Totals (Month to Date)</h3>"
+            details_html += f"<h4 style='color: #ff6b6b;'>💸 Total Outgoing: £{running_outgoing:,.2f}</h4>"
+            details_html += f"<h4 style='color: #51cf66;'>💰 Total Incoming: £{running_incoming:,.2f}</h4>"
+            
+            if running_net > 0:
+                details_html += f"<h4 style='color: #51cf66;'>📊 Running Net: +£{running_net:,.2f}</h4>"
+            elif running_net < 0:
+                details_html += f"<h4 style='color: #ff6b6b;'>📊 Running Net: £{running_net:,.2f}</h4>"
+            else:
+                details_html += f"<h4 style='color: #ffffff;'>📊 Running Net: £0.00</h4>"
+        else:
+            details_html += "<p style='color: #a0a0a0;'>No payments or income scheduled for this day.</p>"
+        
+        self.day_details_text.setHtml(details_html)
+    
+    def on_calendar_month_changed(self, year, month):
+        """Handle calendar month change"""
+        self.refresh_calendar()
     
     def update_monthly_summary(self, month, year):
         """Update monthly summary with current totals"""
